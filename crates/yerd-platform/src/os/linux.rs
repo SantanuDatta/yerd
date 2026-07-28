@@ -10,6 +10,7 @@
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use directories::ProjectDirs;
 
@@ -22,8 +23,104 @@ use crate::pure::{
     networkmanager_dnsmasq, pem_match, port_plan, proc_metrics, resolved_drop_in, system_roots,
 };
 use crate::resolver::ResolverInstaller;
+use crate::terminal::TerminalLauncher;
 use crate::trust_store::{BrowserCaTrust, CaFingerprint, NssOutcome, TrustStore};
-use crate::{BindPairErrorReason, PlatformError, ResolverErrorReason, TrustStoreErrorReason};
+use crate::{
+    BindPairErrorReason, PlatformError, ResolverErrorReason, TerminalErrorReason,
+    TrustStoreErrorReason,
+};
+
+/// Linux terminal launcher.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LinuxTerminalLauncher;
+
+impl LinuxTerminalLauncher {
+    /// Construct.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+const TERMINAL_SPECS: &[(&str, &[&str])] = &[
+    ("x-terminal-emulator", &["--working-directory"]),
+    ("gnome-terminal", &["--working-directory"]),
+    ("konsole", &["--workdir"]),
+    ("xfce4-terminal", &["--working-directory"]),
+    ("kitty", &["--directory"]),
+    ("alacritty", &["--working-directory"]),
+    ("wezterm", &["start", "--cwd"]),
+];
+
+fn terminal_command(program: &str, path: &Path) -> Command {
+    let mut command = Command::new(program);
+    if let Some((_, flags)) = TERMINAL_SPECS.iter().find(|(name, _)| *name == program) {
+        command.args(*flags).arg(path);
+    }
+    command.current_dir(path);
+    command
+}
+
+fn launch_terminal(program: &str, path: &Path) -> std::io::Result<()> {
+    terminal_command(program, path).spawn().map(|_| ())
+}
+
+fn configured_kde_terminal() -> Option<String> {
+    for reader in ["kreadconfig6", "kreadconfig5"] {
+        let output = Command::new(reader)
+            .args([
+                "--file",
+                "kdeglobals",
+                "--group",
+                "General",
+                "--key",
+                "TerminalApplication",
+            ])
+            .output()
+            .ok();
+        let Some(output) = output else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+impl TerminalLauncher for LinuxTerminalLauncher {
+    fn open_terminal(&self, path: &Path) -> Result<(), PlatformError> {
+        let path_arg = path.to_string_lossy();
+        if Command::new("xdg-terminal-exec")
+            .arg(format!("--dir={path_arg}"))
+            .current_dir(path)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if launch_terminal("x-terminal-emulator", path).is_ok() {
+            return Ok(());
+        }
+        if let Some(program) = configured_kde_terminal() {
+            if launch_terminal(&program, path).is_ok() {
+                return Ok(());
+            }
+        }
+        for (program, _) in TERMINAL_SPECS {
+            if launch_terminal(program, path).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(PlatformError::Terminal {
+            reason: TerminalErrorReason::NoSupportedTerminal,
+        })
+    }
+}
 
 /// Linux `Paths` implementation.
 #[derive(Debug, Default, Clone, Copy)]

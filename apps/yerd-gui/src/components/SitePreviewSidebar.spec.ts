@@ -6,6 +6,7 @@ const openPath = vi.fn();
 const openInTerminal = vi.fn();
 const pickDirectory = vi.fn();
 const showDumpsWindow = vi.fn();
+const clipboardWriteText = vi.fn();
 vi.mock("@/ipc/client", () => ({
   openInBrowser: (...args: unknown[]) => openInBrowser(...args),
   openPath: (...args: unknown[]) => openPath(...args),
@@ -53,6 +54,11 @@ describe("SitePreviewSidebar", () => {
     openInTerminal.mockReset();
     pickDirectory.mockReset();
     showDumpsWindow.mockReset();
+    clipboardWriteText.mockReset();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    });
   });
 
   it("renders site information and opens the site", async () => {
@@ -72,7 +78,49 @@ describe("SitePreviewSidebar", () => {
     await openButton.trigger("click");
 
     expect(openInBrowser).toHaveBeenCalledWith("https://blog.test");
+  });
 
+  it("opens site actions and converts a picked web root to a relative path", async () => {
+    const wrapper = mountSidebar();
+    pickDirectory.mockResolvedValue("/srv/blog/public");
+
+    await wrapper.get('[aria-label="Choose web root directory"]').trigger("click");
+    expect(pickDirectory).toHaveBeenCalledWith("/srv/blog");
+    expect((wrapper.get('[aria-label="Site web root"]').element as HTMLInputElement).value).toBe(
+      "public",
+    );
+
+    await wrapper.get('[title="Reveal /srv/blog"]').trigger("click");
+    expect(openPath).toHaveBeenCalledWith("/srv/blog");
+
+    const terminal = wrapper.findAll("button").find((button) => button.text().includes("Terminal"));
+    if (!terminal) throw new Error("Terminal button not rendered");
+    await terminal.trigger("click");
+    expect(openInTerminal).toHaveBeenCalledWith("/srv/blog");
+
+    const logs = wrapper.findAll("button").find((button) => button.text().includes("Logs"));
+    if (!logs) throw new Error("Logs button not rendered");
+    await logs.trigger("click");
+    expect(showDumpsWindow).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a picked directory outside the site folder", async () => {
+    const wrapper = mountSidebar();
+    pickDirectory.mockResolvedValue("/srv/other");
+
+    await wrapper.get('[aria-label="Choose web root directory"]').trigger("click");
+
+    expect((wrapper.get('[aria-label="Site web root"]').element as HTMLInputElement).value).toBe(
+      "",
+    );
+  });
+
+  it("copies the current web root", async () => {
+    const wrapper = mountSidebar();
+
+    await wrapper.get('[aria-label="Copy web root"]').trigger("click");
+
+    expect(clipboardWriteText).toHaveBeenCalledWith("");
   });
 
   it("closes when the backdrop is clicked", async () => {

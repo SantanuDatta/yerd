@@ -96,6 +96,13 @@ pub enum PlatformError {
         /// Optional human-readable install hint (e.g. `"install nss"`).
         install_hint: Option<&'static str>,
     },
+
+    /// A user terminal could not be opened.
+    #[error("terminal: {reason}")]
+    Terminal {
+        /// Specific terminal-launch failure.
+        reason: TerminalErrorReason,
+    },
 }
 
 fn display_install_hint(hint: Option<&'static str>) -> String {
@@ -153,6 +160,27 @@ pub enum ResolverErrorReason {
     /// Drop-in path could not be written (typically permission denied).
     #[error("drop-in path not writable: {}", .0.display())]
     DropInNotWritable(PathBuf),
+}
+
+/// Specific failure modes for [`PlatformError::Terminal`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum TerminalErrorReason {
+    /// The temporary macOS launcher could not be created.
+    #[error("could not create launcher: {0}")]
+    CreateLauncher(#[source] std::io::Error),
+
+    /// The temporary macOS launcher could not be written or configured.
+    #[error("could not prepare launcher: {0}")]
+    PrepareLauncher(#[source] std::io::Error),
+
+    /// The temporary macOS launcher could not be opened.
+    #[error("could not open launcher: {0}")]
+    OpenLauncher(#[source] std::io::Error),
+
+    /// No supported terminal emulator could be launched.
+    #[error("no supported terminal emulator was found")]
+    NoSupportedTerminal,
 }
 
 /// Specific failure modes for [`PlatformError::BindPair`].
@@ -216,6 +244,8 @@ pub mod ops {
     pub const INSTALL_LAN_PORT_REDIRECT: &str = "install-lan-port-redirect";
     /// Remove the macOS LAN pf redirect.
     pub const UNINSTALL_LAN_PORT_REDIRECT: &str = "uninstall-lan-port-redirect";
+    /// Open a user terminal in a project directory.
+    pub const OPEN_TERMINAL: &str = "open-terminal";
 }
 
 #[cfg(test)]

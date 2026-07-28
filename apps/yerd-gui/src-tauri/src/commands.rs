@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use yerd_core::PhpVersion;
 use yerd_ipc::{ErrorCode, Request, Response};
+use yerd_platform::TerminalLauncher;
 
 use crate::error::GuiError;
 use crate::ipc::{exchange, exchange_timeout};
@@ -954,7 +955,8 @@ pub async fn job_cancel(job_id: String) -> Result<Response, GuiError> {
 
 // ── host helpers ───────────────────────────────────────────────────────────
 
-/// Open a user terminal in an existing project directory.
+/// Validate a project directory and delegate terminal launching to the active
+/// OS implementation in `yerd-platform`.
 #[tauri::command]
 pub async fn open_terminal(path: String) -> Result<(), GuiError> {
     let path = PathBuf::from(path);
@@ -964,204 +966,9 @@ pub async fn open_terminal(path: String) -> Result<(), GuiError> {
             path.display()
         )));
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        // macOS does not expose one universal "default terminal" API. A
-        // `.command` file is opened by the user's registered terminal app
-        // (Terminal, iTerm, etc.), so use LaunchServices rather than forcing
-        // Apple Terminal.app.
-        use std::os::unix::fs::PermissionsExt;
-
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| GuiError::internal(format!("system clock error: {e}")))?
-            .as_millis();
-        let quoted_path = shell_quote(&path.to_string_lossy());
-        let script = format!(
-            "#!/bin/sh\nrm -f -- \"$0\"\ncd -- {quoted_path}\nexec \"${{SHELL:-/bin/zsh}}\" -l\n"
-        );
-
-        let mut created = None;
-        for attempt in 0u32..100 {
-            let script_path = std::env::temp_dir().join(format!(
-                "yerd-terminal-{}-{stamp}-{attempt}.command",
-                std::process::id()
-            ));
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&script_path)
-            {
-                Ok(file) => {
-                    created = Some((script_path, file));
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => {
-                    return Err(GuiError::internal(format!(
-                        "could not create terminal launcher: {e}"
-                    )));
-                }
-            }
-        }
-        let Some((script_path, mut file)) = created else {
-            return Err(GuiError::internal(
-                "could not create a unique terminal launcher",
-            ));
-        };
-        if let Err(e) = file.write_all(script.as_bytes()).and_then(|_| {
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700))
-        }) {
-            let _ = std::fs::remove_file(&script_path);
-            return Err(GuiError::internal(format!(
-                "could not prepare terminal launcher: {e}"
-            )));
-        }
-        drop(file);
-
-        match std::process::Command::new("open").arg(&script_path).spawn() {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let _ = std::fs::remove_file(&script_path);
-                Err(GuiError::internal(format!(
-                    "could not open the default terminal: {e}"
-                )))
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let path_arg = path.to_string_lossy().into_owned();
-
-        // Prefer the user's desktop-selected terminal. xdg-terminal-exec is
-        // the freedesktop default-terminal launcher; x-terminal-emulator is
-        // the established alternatives-based launcher on Debian-family
-        // systems.
-        let default_launchers = [
-            ("xdg-terminal-exec", vec![format!("--dir={path_arg}")]),
-            (
-                "x-terminal-emulator",
-                vec!["--working-directory".to_owned(), path_arg.clone()],
-            ),
-        ];
-        for (program, args) in default_launchers {
-            if std::process::Command::new(program)
-                .args(args)
-                .current_dir(&path)
-                .spawn()
-                .is_ok()
-            {
-                return Ok(());
-            }
-        }
-
-        // Plasma stores the terminal selected by the user in kdeglobals.
-        // Honor it before falling back to a compatibility list; otherwise a
-        // machine with both Kitty and Konsole installed could open the wrong
-        // terminal simply because of our probe order.
-        if let Some(program) = configured_kde_terminal() {
-            let executable = Path::new(&program)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(&program);
-            let mut command = std::process::Command::new(&program);
-            match executable {
-                "gnome-terminal" | "xfce4-terminal" => {
-                    command.arg("--working-directory").arg(&path);
-                }
-                "konsole" => {
-                    command.arg("--workdir").arg(&path);
-                }
-                "kitty" => {
-                    command.arg("--directory").arg(&path);
-                }
-                "alacritty" => {
-                    command.arg("--working-directory").arg(&path);
-                }
-                "wezterm" => {
-                    command.args(["start", "--cwd"]).arg(&path);
-                }
-                _ => {
-                    command.current_dir(&path);
-                }
-            }
-            if command.current_dir(&path).spawn().is_ok() {
-                return Ok(());
-            }
-        }
-
-        // Compatibility fallback for older desktop environments without a
-        // standard default-terminal launcher.
-        let candidates = [
-            ("gnome-terminal", vec!["--working-directory"]),
-            ("konsole", vec!["--workdir"]),
-            ("xfce4-terminal", vec!["--working-directory"]),
-            ("kitty", vec!["--directory"]),
-            ("alacritty", vec!["--working-directory"]),
-            ("wezterm", vec!["start", "--cwd"]),
-        ];
-        for (program, flags) in candidates {
-            let result = std::process::Command::new(program)
-                .args(flags)
-                .arg(&path)
-                .spawn();
-            if result.is_ok() {
-                return Ok(());
-            }
-        }
-        Err(GuiError::internal(
-            "no supported terminal emulator was found",
-        ))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // Starting cmd lets Windows use the user's configured default
-        // console host (Windows Terminal or Windows Console Host).
-        let command = format!("cd /d \"{}\"", path.to_string_lossy());
-        return std::process::Command::new("cmd")
-            .args(["/K", &command])
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| GuiError::internal(format!("could not open the default terminal: {e}")));
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        Err(GuiError::internal(
-            "opening a terminal is not supported on this platform",
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn configured_kde_terminal() -> Option<String> {
-    for reader in ["kreadconfig6", "kreadconfig5"] {
-        let output = std::process::Command::new(reader)
-            .args([
-                "--file",
-                "kdeglobals",
-                "--group",
-                "General",
-                "--key",
-                "TerminalApplication",
-            ])
-            .output()
-            .ok();
-        let Some(output) = output else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !value.is_empty() {
-            return Some(value);
-        }
-    }
-    None
+    yerd_platform::ActiveTerminalLauncher::new()
+        .open_terminal(&path)
+        .map_err(|error| GuiError::internal(error.to_string()))
 }
 
 #[cfg(target_os = "macos")]

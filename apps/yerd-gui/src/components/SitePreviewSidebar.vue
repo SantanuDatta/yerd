@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowUpRight, Eye, FileText, FolderOpen, Terminal, X } from "lucide-vue-next";
+import { ArrowUpRight, Copy, Eye, FileText, FolderOpen, Terminal, X } from "lucide-vue-next";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
 import Button from "@/components/ui/Button.vue";
@@ -86,7 +86,30 @@ function changeWebRoot(site: SiteEntry | null): void {
 
 async function chooseWebRoot(site: SiteEntry): Promise<void> {
   const directory = await pickDirectory(site.document_root);
-  if (directory) webRoot.value = directory;
+  if (!directory) return;
+  const relative = relativeWebRoot(site.document_root, directory);
+  if (relative === null) {
+    toast.error("Invalid web root", "Choose a directory inside the site folder.");
+    return;
+  }
+  webRoot.value = relative;
+}
+
+function relativeWebRoot(siteRoot: string, selectedDirectory: string): string | null {
+  const root = siteRoot.replace(/[\\/]+$/, "").replace(/[\\]/g, "/");
+  const selected = selectedDirectory.replace(/[\\]/g, "/");
+  if (root === "/") return selected.startsWith("/") ? selected.slice(1) : null;
+  if (selected === root) return "";
+  return selected.startsWith(`${root}/`) ? selected.slice(root.length + 1) : null;
+}
+
+async function copyWebRoot(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(webRoot.value);
+    toast.success("Copied web root");
+  } catch {
+    toast.error("Couldn't copy web root", "Your browser blocked clipboard access.");
+  }
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -227,6 +250,15 @@ onUnmounted(() => {
                     @click="chooseWebRoot(site)"
                   >
                     <FolderOpen class="size-4" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    :disabled="busy"
+                    aria-label="Copy web root"
+                    title="Copy web root"
+                    @click="copyWebRoot"
+                  >
+                    <Copy class="size-4" />
                   </Button>
                 </div>
                 <p class="mt-1 text-xs text-muted-foreground">
