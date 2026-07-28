@@ -22,6 +22,7 @@ import {
 import CreateLaravelWizard from "@/components/site-create/CreateLaravelWizard.vue";
 import CreateWordPressWizard from "@/components/site-create/CreateWordPressWizard.vue";
 import SiteCard from "@/components/SiteCard.vue";
+import SitePreviewSidebar from "@/components/SitePreviewSidebar.vue";
 import ManageDomainsModal from "@/components/ManageDomainsModal.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import Badge from "@/components/ui/Badge.vue";
@@ -94,6 +95,25 @@ const filterInput = ref<InstanceType<typeof Input> | null>(null);
 const tld = computed(() => report.value?.tld ?? "test");
 const caTrusted = computed(() => report.value?.ca.trusted_system === true);
 
+const sidebarTarget = ref<string | null>(null);
+const sidebarSite = computed<SiteEntry | null>(() =>
+  sidebarTarget.value
+    ? (sites.value.find((site) => site.name === sidebarTarget.value) ?? null)
+    : null,
+);
+
+function openSidebar(site: SiteEntry): void {
+  sidebarTarget.value = site.name;
+}
+
+function closeSidebar(): void {
+  sidebarTarget.value = null;
+}
+
+watch(sidebarSite, (site) => {
+  if (!site) closeSidebar();
+});
+
 // ── site groups ──
 const emptyGroups: GroupsState = { order: [], members: {} };
 const groups = computed<GroupsState>(() => data.value?.groups ?? emptyGroups);
@@ -130,6 +150,53 @@ async function toggleSecure(site: Site): Promise<void> {
     await load({ force: true });
   } catch (e) {
     toast.error("Couldn't change HTTPS", (e as IpcError).message);
+  } finally {
+    rowBusy.value = null;
+  }
+}
+
+async function changeSitePhp(site: SiteEntry, version: string): Promise<void> {
+  if (version === site.php) return;
+  rowBusy.value = `edit:${site.name}`;
+  try {
+    await setPhp(site.name, version);
+    toast.success(`PHP ${version} selected for ${site.name}`);
+    await load({ force: true });
+  } catch (e) {
+    toast.error("Couldn't change PHP version", (e as IpcError).message);
+  } finally {
+    rowBusy.value = null;
+  }
+}
+
+async function changeSiteWebRoot(site: SiteEntry, path: string): Promise<void> {
+  const current = site.web_subpath ?? "";
+  if (path === current) return;
+  rowBusy.value = `edit:${site.name}`;
+  try {
+    await setWebRoot(site.name, path === "" ? null : path);
+    toast.success(path === "" ? `Web root reset for ${site.name}` : `Web root changed for ${site.name}`);
+    await load({ force: true });
+  } catch (e) {
+    toast.error("Couldn't change web root", (e as IpcError).message);
+  } finally {
+    rowBusy.value = null;
+  }
+}
+
+async function toggleFrontController(site: SiteEntry, enabled: boolean): Promise<void> {
+  if (enabled === site.uses_front_controller) return;
+  rowBusy.value = `edit:${site.name}`;
+  try {
+    await setFrontController(site.name, enabled);
+    toast.success(
+      enabled
+        ? `Front controller enabled for ${site.name}`
+        : `Front controller disabled for ${site.name}`,
+    );
+    await load({ force: true });
+  } catch (e) {
+    toast.error("Couldn't change front controller", (e as IpcError).message);
   } finally {
     rowBusy.value = null;
   }
@@ -806,6 +873,7 @@ async function shareSitePublicly(s: Site): Promise<void> {
               :tld="tld"
               :busy="siteBusy(s.name)"
               :sharing="sharing === s.name"
+              @view="openSidebar"
               @edit="openEdit"
               @manage-domains="openManageDomains"
               @unlink="openUnlink"
@@ -903,6 +971,7 @@ async function shareSitePublicly(s: Site): Promise<void> {
                     :tld="tld"
                     :busy="siteBusy(s.name)"
                     :sharing="sharing === s.name"
+                    @view="openSidebar"
                     @edit="openEdit"
                     @manage-domains="openManageDomains"
                     @unlink="openUnlink"
@@ -967,6 +1036,20 @@ async function shareSitePublicly(s: Site): Promise<void> {
         </section>
       </AsyncState>
     </div>
+
+    <SitePreviewSidebar
+      :site="sidebarSite"
+      :open="sidebarSite !== null"
+      :report="report ?? null"
+      :tld="tld"
+      :php-versions="phpVersionList"
+      :busy="sidebarSite ? siteBusy(sidebarSite.name) : false"
+      @close="closeSidebar"
+      @change-php="changeSitePhp"
+      @change-web-root="changeSiteWebRoot"
+      @toggle-secure="toggleSecure"
+      @toggle-front-controller="toggleFrontController"
+    />
 
     <!-- create new Laravel site wizard -->
     <CreateLaravelWizard

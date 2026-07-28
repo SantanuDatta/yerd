@@ -129,4 +129,14 @@ describe("SiteCard openWpAdmin gating", () => {
       "http://blog.test/wp-admin/?yerd_login_token=sekrit-token",
     );
   });
+
+  it("opens the site details from the view action", async () => {
+    const site = wpSite();
+    const wrapper = mountCard(site, boundReport());
+
+    await wrapper.find('[aria-label="View blog"]').trigger("click");
+
+    expect(wrapper.emitted("view")).toEqual([[site]]);
+    expect(openInBrowser).not.toHaveBeenCalled();
+  });
 });

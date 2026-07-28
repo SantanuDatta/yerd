@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {
+  ArrowUpRight,
   ExternalLink,
+  Eye,
   FolderOpen,
   FolderTree,
   Globe,
@@ -38,6 +40,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  view: [site: SiteEntry];
   edit: [site: SiteEntry];
   manageDomains: [site: SiteEntry];
   unlink: [site: SiteEntry];
@@ -94,6 +97,7 @@ async function openWpAdmin(s: SiteEntry): Promise<void> {
           @click="openInBrowser(siteUrl(site, report))"
         >
           <span class="truncate">{{ displayHost(site) }}</span>
+          <ArrowUpRight class="size-3 shrink-0 opacity-70" />
           <span
             v-if="extraDomainCount(site) > 0"
             class="shrink-0 rounded bg-muted px-1 text-[10px] font-normal text-muted-foreground"
@@ -121,11 +125,11 @@ async function openWpAdmin(s: SiteEntry): Promise<void> {
         <Button
           variant="ghost"
           size="icon"
-          :aria-label="openTitle(site, report)"
-          :title="openTitle(site, report)"
-          @click="openInBrowser(siteUrl(site, report))"
+          :aria-label="`View ${site.name}`"
+          :title="`View ${site.name}`"
+          @click="emit('view', site)"
         >
-          <ExternalLink class="size-4" />
+          <Eye class="size-4" />
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger as-child>

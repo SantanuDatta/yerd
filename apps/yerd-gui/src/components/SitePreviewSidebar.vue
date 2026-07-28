@@ -1,0 +1,363 @@
+<script setup lang="ts">
+import { ArrowUpRight, Eye, FileText, FolderOpen, Terminal, X } from "lucide-vue-next";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+
+import Button from "@/components/ui/Button.vue";
+import Input from "@/components/ui/Input.vue";
+import Select from "@/components/ui/Select.vue";
+import Switch from "@/components/ui/Switch.vue";
+import {
+  IpcError,
+  openInBrowser,
+  openInTerminal,
+  openPath,
+  pickDirectory,
+  showDumpsWindow,
+} from "@/ipc/client";
+import type { SiteEntry, StatusReport } from "@/ipc/types";
+import { siteUrl } from "@/lib/siteUrl";
+import { useToast } from "@/composables/useToast";
+
+const props = defineProps<{
+  site: SiteEntry | null;
+  open: boolean;
+  report: StatusReport | null;
+  tld: string;
+  phpVersions: string[];
+  busy?: boolean;
+}>();
+
+const emit = defineEmits<{
+  close: [];
+  changePhp: [site: SiteEntry, version: string];
+  changeWebRoot: [site: SiteEntry, path: string];
+  toggleSecure: [site: SiteEntry];
+  toggleFrontController: [site: SiteEntry, enabled: boolean];
+}>();
+
+const toast = useToast();
+const activeTab = ref<"general" | "information">("general");
+const webRoot = ref("");
+
+const phpOptions = computed(() => {
+  const versions = props.site
+    ? Array.from(new Set([props.site.php, ...props.phpVersions]))
+    : props.phpVersions;
+  return versions.map((version) => ({ value: version, label: `PHP ${version}` }));
+});
+
+function displayHost(site: SiteEntry): string {
+  return site.primary_domain ?? `${site.name}.${props.tld}`;
+}
+
+function servedLabel(site: SiteEntry): string {
+  return site.web_subpath && site.web_subpath !== "" ? `/${site.web_subpath}` : "/";
+}
+
+function applicationLabel(site: SiteEntry): string {
+  if (site.is_laravel) return "Laravel";
+  if (site.is_wordpress) return "WordPress";
+  return "PHP site";
+}
+
+async function openTerminal(site: SiteEntry): Promise<void> {
+  try {
+    await openInTerminal(site.document_root);
+  } catch (error) {
+    toast.error("Couldn't open terminal", (error as IpcError).message);
+  }
+}
+
+async function openLogs(): Promise<void> {
+  try {
+    await showDumpsWindow();
+  } catch (error) {
+    toast.error("Couldn't open logs", (error as IpcError).message);
+  }
+}
+
+function changePhp(site: SiteEntry | null, version: string): void {
+  if (site) emit("changePhp", site, version);
+}
+
+function changeWebRoot(site: SiteEntry | null): void {
+  if (site) emit("changeWebRoot", site, webRoot.value.trim());
+}
+
+async function chooseWebRoot(site: SiteEntry): Promise<void> {
+  const directory = await pickDirectory(site.document_root);
+  if (directory) webRoot.value = directory;
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (props.open && event.key === "Escape") emit("close");
+}
+
+watch(
+  () => props.site?.web_subpath ?? "",
+  (value) => {
+    webRoot.value = value;
+  },
+  { immediate: true },
+);
+
+onMounted(() => {
+  document.addEventListener("keydown", onKeydown);
+});
+onUnmounted(() => {
+  document.removeEventListener("keydown", onKeydown);
+});
+</script>
+
+<template>
+  <Teleport to="body">
+    <Transition name="site-sidebar-backdrop">
+      <div
+        v-if="open && site"
+        class="site-sidebar-backdrop fixed inset-0 z-40 bg-black/40"
+        aria-hidden="true"
+        @click="emit('close')"
+      />
+    </Transition>
+
+    <Transition name="site-sidebar-panel">
+      <aside
+        v-if="open && site"
+        class="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l bg-background shadow-2xl"
+        aria-label="Site details"
+        role="dialog"
+        aria-modal="true"
+        @click.stop
+      >
+        <div class="flex items-start justify-between gap-4 border-b px-5 py-4">
+          <div class="min-w-0">
+            <div class="mb-2 flex items-center gap-2 text-muted-foreground">
+              <Eye class="size-4" />
+              <span class="text-xs font-medium uppercase tracking-wider">Site details</span>
+            </div>
+            <h2 class="truncate font-mono text-lg font-medium">{{ displayHost(site) }}</h2>
+            <p class="mt-1 text-xs text-muted-foreground">{{ applicationLabel(site) }}</p>
+          </div>
+          <Button variant="ghost" size="icon" aria-label="Close site details" @click="emit('close')">
+            <X class="size-5" />
+          </Button>
+        </div>
+
+        <div class="flex border-b px-5">
+          <button
+            type="button"
+            class="border-b-2 px-3 py-2.5 text-xs font-medium transition-colors"
+            :class="activeTab === 'general' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            :aria-selected="activeTab === 'general'"
+            role="tab"
+            @click="activeTab = 'general'"
+          >
+            General
+          </button>
+          <button
+            type="button"
+            class="border-b-2 px-3 py-2.5 text-xs font-medium transition-colors"
+            :class="activeTab === 'information' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            :aria-selected="activeTab === 'information'"
+            role="tab"
+            @click="activeTab = 'information'"
+          >
+            Information
+          </button>
+        </div>
+
+        <div class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          <template v-if="activeTab === 'general'">
+            <Button class="w-full" @click="openInBrowser(siteUrl(site, report))">
+              Open site
+              <ArrowUpRight />
+            </Button>
+
+            <div class="mt-4 grid grid-cols-2 gap-2">
+              <Button class="min-w-0 px-2" variant="outline" size="sm" @click="openTerminal(site)">
+                <Terminal /> <span class="truncate">Terminal</span>
+              </Button>
+              <Button class="min-w-0 px-2" variant="outline" size="sm" @click="openLogs">
+                <FileText /> <span class="truncate">Logs</span>
+              </Button>
+            </div>
+
+            <dl class="mt-5 divide-y rounded-lg border">
+              <div class="flex items-center justify-between gap-4 px-3 py-3">
+                <dt class="shrink-0 text-xs text-muted-foreground">PHP version</dt>
+                <dd class="min-w-0">
+                  <Select
+                    :model-value="site.php"
+                    :options="phpOptions"
+                    aria-label="Site PHP version"
+                    :disabled="busy || phpOptions.length === 0"
+                    @update:model-value="changePhp(site, $event)"
+                  />
+                </dd>
+              </div>
+              <div class="px-3 py-3">
+                <dt class="text-xs text-muted-foreground">Path</dt>
+                <dd class="mt-1 flex items-start gap-2 text-sm">
+                  <FolderOpen class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <button
+                    class="min-w-0 break-all text-left font-mono hover:text-brand"
+                    :title="`Reveal ${site.document_root}`"
+                    @click="openPath(site.document_root)"
+                  >
+                    {{ site.document_root }}
+                  </button>
+                </dd>
+              </div>
+              <div class="px-3 py-3">
+                <label class="block text-xs text-muted-foreground" for="site-web-root">Web root</label>
+                <div class="mt-1.5 flex gap-2">
+                  <Input
+                    id="site-web-root"
+                    v-model="webRoot"
+                    class="h-8 min-w-0"
+                    :disabled="busy"
+                    placeholder="public"
+                    aria-label="Site web root"
+                    @keydown.enter="changeWebRoot(site)"
+                  />
+                  <Button
+                    variant="outline"
+                    :disabled="busy"
+                    aria-label="Choose web root directory"
+                    @click="chooseWebRoot(site)"
+                  >
+                    <FolderOpen class="size-4" />
+                  </Button>
+                </div>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  Directory served as the document root, relative to the site folder (e.g.
+                  <code class="font-mono">public</code>). Leave blank to auto-detect.
+                </p>
+                <div v-if="webRoot.trim() !== (site.web_subpath ?? '')" class="mt-2 flex justify-end">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="busy"
+                    @click="changeWebRoot(site)"
+                  >
+                    Save
+                  </Button>
+                </div>
+              </div>
+              <div class="px-3 py-3">
+                <dt class="text-xs text-muted-foreground">URL</dt>
+                <dd class="mt-1 break-all font-mono text-sm">{{ siteUrl(site, report) }}</dd>
+              </div>
+              <div class="px-3 py-3">
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <dt class="text-sm font-medium">HTTPS</dt>
+                    <dd class="mt-1 text-xs text-muted-foreground">Serve this site over TLS.</dd>
+                  </div>
+                  <Switch
+                    :model-value="site.secure"
+                    :disabled="busy"
+                    aria-label="HTTPS"
+                    @update:model-value="emit('toggleSecure', site)"
+                  />
+                </div>
+              </div>
+              <div v-if="!site.is_wordpress && site.uses_front_controller !== undefined" class="px-3 py-3">
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <dt class="text-sm font-medium">Route through front controller</dt>
+                    <dd class="mt-1 text-xs text-muted-foreground">
+                      On: every request funnels through the site's <code class="font-mono">index.php</code>
+                      (Laravel, Symfony). Off: named <code class="font-mono">.php</code> files are executed directly
+                      (plain PHP).
+                    </dd>
+                  </div>
+                  <Switch
+                    :model-value="site.uses_front_controller"
+                    :disabled="busy"
+                    aria-label="Route through front controller"
+                    @update:model-value="emit('toggleFrontController', site, $event)"
+                  />
+                </div>
+              </div>
+            </dl>
+
+          </template>
+
+          <template v-else>
+            <dl class="divide-y rounded-lg border">
+              <div class="px-3 py-3">
+                <dt class="text-xs text-muted-foreground">Application</dt>
+                <dd class="mt-1 text-sm">{{ applicationLabel(site) }}</dd>
+              </div>
+              <div class="px-3 py-3">
+                <dt class="text-xs text-muted-foreground">Domains</dt>
+                <dd class="mt-1 space-y-1 font-mono text-sm">
+                  <div v-for="domain in site.domains ?? [displayHost(site)]" :key="domain">
+                    {{ domain }}
+                  </div>
+                </dd>
+              </div>
+              <div class="grid grid-cols-2 divide-x border-t">
+                <div class="px-3 py-3">
+                  <dt class="text-xs text-muted-foreground">Web root</dt>
+                  <dd class="mt-1 font-mono text-sm">{{ servedLabel(site) }}</dd>
+                </div>
+                <div class="px-3 py-3 pl-4">
+                  <dt class="text-xs text-muted-foreground">Type</dt>
+                  <dd class="mt-1 capitalize text-sm">{{ site.kind }}</dd>
+                </div>
+              </div>
+              <div class="grid grid-cols-2 divide-x border-t">
+                <div class="px-3 py-3">
+                  <dt class="text-xs text-muted-foreground">PHP</dt>
+                  <dd class="mt-1 font-mono text-sm">{{ site.php }}</dd>
+                </div>
+                <div class="px-3 py-3 pl-4">
+                  <dt class="text-xs text-muted-foreground">Protocol</dt>
+                  <dd class="mt-1 text-sm">{{ site.secure ? "HTTPS" : "HTTP" }}</dd>
+                </div>
+              </div>
+              <div v-if="site.uses_front_controller !== undefined" class="px-3 py-3">
+                <dt class="text-xs text-muted-foreground">Front controller</dt>
+                <dd class="mt-1 text-sm">{{ site.uses_front_controller ? "Enabled" : "Disabled" }}</dd>
+              </div>
+              <div v-if="site.is_wordpress" class="px-3 py-3">
+                <dt class="text-xs text-muted-foreground">WordPress auto-login</dt>
+                <dd class="mt-1 text-sm">
+                  {{ site.wp_auto_login ? `Enabled${site.wp_auto_login_user ? ` as ${site.wp_auto_login_user}` : ""}` : "Disabled" }}
+                </dd>
+              </div>
+            </dl>
+
+            <p v-if="site.apex_shadowed_by" class="mt-4 rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+              {{ site.name }}.{{ tld }} is served by “{{ site.apex_shadowed_by }}”.
+            </p>
+          </template>
+        </div>
+      </aside>
+    </Transition>
+  </Teleport>
+</template>
+
+<style scoped>
+.site-sidebar-backdrop-enter-active,
+.site-sidebar-backdrop-leave-active {
+  transition: opacity 180ms ease;
+}
+
+.site-sidebar-backdrop-enter-from,
+.site-sidebar-backdrop-leave-to {
+  opacity: 0;
+}
+
+.site-sidebar-panel-enter-active,
+.site-sidebar-panel-leave-active {
+  transition: transform 220ms ease;
+}
+
+.site-sidebar-panel-enter-from,
+.site-sidebar-panel-leave-to {
+  transform: translateX(100%);
+}
+</style>
