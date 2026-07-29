@@ -58,10 +58,7 @@ impl TerminalLauncher for MacosTerminalLauncher {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| PlatformError::Terminal {
-                reason: TerminalErrorReason::PrepareLauncher(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e,
-                )),
+                reason: TerminalErrorReason::PrepareLauncher(std::io::Error::other(e)),
             })?
             .as_millis();
         let quoted_path = shell_quote(&path.to_string_lossy());
@@ -85,7 +82,7 @@ impl TerminalLauncher for MacosTerminalLauncher {
                     created = Some((script_path, file));
                     break;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => {
                     return Err(PlatformError::Terminal {
                         reason: TerminalErrorReason::CreateLauncher(e),
@@ -103,7 +100,7 @@ impl TerminalLauncher for MacosTerminalLauncher {
         };
         if let Err(e) = file
             .write_all(script.as_bytes())
-            .and_then(|_| fs::set_permissions(&script_path, fs::Permissions::from_mode(0o700)))
+            .and_then(|()| fs::set_permissions(&script_path, fs::Permissions::from_mode(0o700)))
         {
             let _ = fs::remove_file(&script_path);
             return Err(PlatformError::Terminal {
