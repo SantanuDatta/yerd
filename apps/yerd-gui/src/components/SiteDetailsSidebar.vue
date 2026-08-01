@@ -1,10 +1,23 @@
 <script setup lang="ts">
-import { ArrowUpRight, Copy, Eye, FileText, FolderOpen, Terminal, X } from "lucide-vue-next";
+import {
+  ArrowUpRight,
+  Copy,
+  FileText,
+  FolderOpen,
+  Globe,
+  Pencil,
+  Terminal,
+  Trash2,
+  UserRound,
+  X,
+} from "lucide-vue-next";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
+import SiteDomainsPanel from "@/components/SiteDomainsPanel.vue";
 import Button from "@/components/ui/Button.vue";
 import Input from "@/components/ui/Input.vue";
 import Select from "@/components/ui/Select.vue";
+import Spinner from "@/components/ui/Spinner.vue";
 import Switch from "@/components/ui/Switch.vue";
 import {
   IpcError,
@@ -13,9 +26,11 @@ import {
   openPath,
   pickDirectory,
   showDumpsWindow,
+  wordpressAdminUsers,
 } from "@/ipc/client";
 import type { SiteEntry, StatusReport } from "@/ipc/types";
 import { siteUrl } from "@/lib/siteUrl";
+import { openWpAdmin } from "@/lib/wpAdmin";
 import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{
@@ -24,7 +39,14 @@ const props = defineProps<{
   report: StatusReport | null;
   tld: string;
   phpVersions: string[];
+  /** Group picker options (including the "No group" entry). Empty when no
+   *  groups are defined, which hides the row entirely. */
+  groupOptions?: { value: string; label: string }[];
+  /** The site's current group, or "" when ungrouped. */
+  currentGroup?: string;
   busy?: boolean;
+  /** Whether a "share publicly" action for this site is in flight. */
+  sharing?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -33,10 +55,15 @@ const emit = defineEmits<{
   changeWebRoot: [site: SiteEntry, path: string];
   toggleSecure: [site: SiteEntry];
   toggleFrontController: [site: SiteEntry, enabled: boolean];
+  changeGroup: [site: SiteEntry, group: string];
+  changeWpAutoLogin: [site: SiteEntry, enabled: boolean, user: string | null];
+  share: [site: SiteEntry];
+  unlink: [site: SiteEntry];
+  domainsChanged: [];
 }>();
 
 const toast = useToast();
-const activeTab = ref<"general" | "information">("general");
+const activeTab = ref<"general" | "domains" | "information">("general");
 const webRoot = ref("");
 
 const phpOptions = computed(() => {
@@ -45,6 +72,49 @@ const phpOptions = computed(() => {
     : props.phpVersions;
   return versions.map((version) => ({ value: version, label: `PHP ${version}` }));
 });
+
+const hasGroups = computed(() => (props.groupOptions?.length ?? 0) > 0);
+
+const DEFAULT_ADMIN_OPTION = { value: "", label: "Earliest admin (default)" };
+type WpAdminUsersStatus = "idle" | "loading" | "ready" | "error";
+const wpAdminUsersStatus = ref<WpAdminUsersStatus>("idle");
+const wpAdminUsersError = ref("");
+const wpAdminUsersOptions = ref<{ value: string; label: string }[]>([DEFAULT_ADMIN_OPTION]);
+
+/** The picker's real `:options` while loaded; a single synthetic "Loading…"/
+ *  "Error: …" entry otherwise, paired with the Select's own `disabled` state
+ *  (also gated on `wpAdminUsersStatus`) so an in-flight or failed fetch is
+ *  never mistaken for "no other admins exist". */
+const wpAdminUserSelectOptions = computed(() =>
+  wpAdminUsersStatus.value === "loading"
+    ? [{ value: "", label: "Loading users…" }]
+    : wpAdminUsersStatus.value === "error"
+      ? [{ value: "", label: `Error: ${wpAdminUsersError.value}` }]
+      : wpAdminUsersOptions.value,
+);
+
+/** Bumped on every `loadWpAdminUsers` call so a response for a site the user
+ *  has since navigated away from (closed the sidebar, opened another site's)
+ *  can recognize it's stale and skip applying its result. */
+let wpAdminUsersRequestId = 0;
+
+async function loadWpAdminUsers(name: string): Promise<void> {
+  const requestId = ++wpAdminUsersRequestId;
+  wpAdminUsersStatus.value = "loading";
+  try {
+    const users = await wordpressAdminUsers(name);
+    if (requestId !== wpAdminUsersRequestId) return;
+    wpAdminUsersOptions.value = [
+      DEFAULT_ADMIN_OPTION,
+      ...users.map((u) => ({ value: u.login, label: u.display_name || u.login })),
+    ];
+    wpAdminUsersStatus.value = "ready";
+  } catch (e) {
+    if (requestId !== wpAdminUsersRequestId) return;
+    wpAdminUsersError.value = (e as IpcError).message || "couldn't load admin users";
+    wpAdminUsersStatus.value = "error";
+  }
+}
 
 function displayHost(site: SiteEntry): string {
   return site.primary_domain ?? `${site.name}.${props.tld}`;
@@ -74,6 +144,18 @@ async function openLogs(): Promise<void> {
   } catch (error) {
     toast.error("Couldn't open logs", (error as IpcError).message);
   }
+}
+
+function changeGroup(site: SiteEntry | null, group: string): void {
+  if (site) emit("changeGroup", site, group);
+}
+
+function toggleWpAutoLogin(site: SiteEntry, enabled: boolean): void {
+  emit("changeWpAutoLogin", site, enabled, site.wp_auto_login_user || null);
+}
+
+function changeWpAutoLoginUser(site: SiteEntry, user: string): void {
+  emit("changeWpAutoLogin", site, true, user || null);
 }
 
 function changePhp(site: SiteEntry | null, version: string): void {
@@ -112,8 +194,21 @@ async function copyWebRoot(): Promise<void> {
   }
 }
 
+const panel = ref<HTMLElement | null>(null);
+
+/** Whether another modal dialog is layered above the sidebar. Dialogs opened
+ *  from inside it (the unlink confirm) teleport into `<body>` after this panel,
+ *  so a later `[role="dialog"]` in document order sits on top and owns Escape -
+ *  without this both listeners fire and one keypress dismisses the pair. A panel
+ *  that isn't in the document (a detached test mount) counts as first. */
+function hasDialogAbove(): boolean {
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]'));
+  const own = panel.value ? dialogs.indexOf(panel.value) : -1;
+  return dialogs.some((dialog, index) => dialog !== panel.value && index > own);
+}
+
 function onKeydown(event: KeyboardEvent): void {
-  if (props.open && event.key === "Escape") emit("close");
+  if (props.open && event.key === "Escape" && !hasDialogAbove()) emit("close");
 }
 
 // Resync the edit buffer from the site it belongs to. Keyed on the site name
@@ -125,6 +220,22 @@ watch(
   [() => props.open, () => props.site?.name, () => props.site?.web_subpath],
   () => {
     webRoot.value = props.site?.web_subpath ?? "";
+  },
+  { immediate: true },
+);
+
+// Reopening (or retargeting) starts on General rather than whichever tab was
+// left showing, and refetches the WordPress admin list for the site now in view.
+// The fetch isn't gated on `wp_auto_login` being on: the picker has to be
+// populated by the time the toggle is switched on, not after.
+watch(
+  [() => props.open, () => props.site?.name],
+  () => {
+    activeTab.value = "general";
+    if (!props.open || !props.site?.is_wordpress) return;
+    wpAdminUsersStatus.value = "idle";
+    wpAdminUsersOptions.value = [DEFAULT_ADMIN_OPTION];
+    void loadWpAdminUsers(props.site.name);
   },
   { immediate: true },
 );
@@ -151,6 +262,7 @@ onUnmounted(() => {
     <Transition name="site-sidebar-panel">
       <aside
         v-if="open && site"
+        ref="panel"
         class="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l bg-background shadow-2xl"
         aria-label="Site details"
         role="dialog"
@@ -160,7 +272,7 @@ onUnmounted(() => {
         <div class="flex items-start justify-between gap-4 border-b px-5 py-4">
           <div class="min-w-0">
             <div class="mb-2 flex items-center gap-2 text-muted-foreground">
-              <Eye class="size-4" />
+              <Pencil class="size-4" />
               <span class="text-xs font-medium uppercase tracking-wider">Site details</span>
             </div>
             <h2 class="truncate font-mono text-lg font-medium">{{ displayHost(site) }}</h2>
@@ -181,6 +293,16 @@ onUnmounted(() => {
             @click="activeTab = 'general'"
           >
             General
+          </button>
+          <button
+            type="button"
+            class="border-b-2 px-3 py-2.5 text-xs font-medium transition-colors"
+            :class="activeTab === 'domains' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            :aria-selected="activeTab === 'domains'"
+            role="tab"
+            @click="activeTab = 'domains'"
+          >
+            Domains
           </button>
           <button
             type="button"
@@ -207,6 +329,28 @@ onUnmounted(() => {
               </Button>
               <Button class="min-w-0 px-2" variant="outline" size="sm" @click="openLogs">
                 <FileText /> <span class="truncate">Logs</span>
+              </Button>
+              <Button
+                v-if="site.is_wordpress"
+                class="min-w-0 px-2"
+                variant="outline"
+                size="sm"
+                title="Signs you in automatically when auto-login is enabled"
+                @click="openWpAdmin(site, report)"
+              >
+                <UserRound /> <span class="truncate">WP Admin</span>
+              </Button>
+              <Button
+                class="min-w-0 px-2"
+                variant="outline"
+                size="sm"
+                :disabled="sharing"
+                title="Publish this site over a Cloudflare Quick Tunnel"
+                @click="emit('share', site)"
+              >
+                <Spinner v-if="sharing" class="size-4" />
+                <Globe v-else />
+                <span class="truncate">Share publicly…</span>
               </Button>
             </div>
 
@@ -317,8 +461,79 @@ onUnmounted(() => {
                   />
                 </div>
               </div>
+              <div v-if="site.is_wordpress" class="px-3 py-3">
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <dt class="text-sm font-medium">WordPress Auto Admin Login</dt>
+                    <dd class="mt-1 text-xs text-muted-foreground">
+                      Sign in automatically when opening WP Admin.
+                    </dd>
+                  </div>
+                  <Switch
+                    :model-value="site.wp_auto_login ?? false"
+                    :disabled="busy"
+                    aria-label="WordPress Auto Admin Login"
+                    @update:model-value="toggleWpAutoLogin(site, $event)"
+                  />
+                </div>
+                <div v-if="site.wp_auto_login" class="mt-3">
+                  <label class="block text-xs text-muted-foreground" for="site-wp-admin-user">
+                    Sign in as
+                  </label>
+                  <div class="mt-1.5">
+                    <Select
+                      id="site-wp-admin-user"
+                      :model-value="wpAdminUsersStatus === 'ready' ? (site.wp_auto_login_user ?? '') : ''"
+                      :options="wpAdminUserSelectOptions"
+                      :disabled="busy || wpAdminUsersStatus !== 'ready'"
+                      class="w-full"
+                      aria-label="Sign in as"
+                      @update:model-value="changeWpAutoLoginUser(site, $event)"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div v-if="hasGroups" class="px-3 py-3">
+                <div class="flex items-center justify-between gap-4">
+                  <dt class="shrink-0 text-xs text-muted-foreground">Group</dt>
+                  <dd class="min-w-0">
+                    <Select
+                      :model-value="currentGroup ?? ''"
+                      :options="groupOptions ?? []"
+                      :disabled="busy"
+                      aria-label="Site group"
+                      @update:model-value="changeGroup(site, $event)"
+                    />
+                  </dd>
+                </div>
+              </div>
             </dl>
 
+            <!-- Only linked sites are removable here (by name). A parked site is
+                 removed by un-parking its folder. -->
+            <div v-if="site.kind === 'linked'" class="mt-5 rounded-lg border border-destructive/40 p-3">
+              <div class="flex items-center justify-between gap-4">
+                <div class="min-w-0">
+                  <p class="text-sm font-medium">Unlink this site</p>
+                  <p class="mt-1 text-xs text-muted-foreground">
+                    Stops serving {{ displayHost(site) }}. The project folder is left untouched.
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="shrink-0 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  :disabled="busy"
+                  @click="emit('unlink', site)"
+                >
+                  <Trash2 class="size-4" /> Unlink
+                </Button>
+              </div>
+            </div>
+          </template>
+
+          <template v-else-if="activeTab === 'domains'">
+            <SiteDomainsPanel :site="site" :tld="tld" @changed="emit('domainsChanged')" />
           </template>
 
           <template v-else>
