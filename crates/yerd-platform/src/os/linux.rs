@@ -43,9 +43,33 @@ impl LinuxTerminalLauncher {
     }
 }
 
+/// The file name `program` actually runs, following symlinks. `x-terminal-emulator`
+/// is Debian's alternatives link and can point at anything, so its flags have to
+/// come from the link target: `gnome-terminal` needs `--working-directory`
+/// because its D-Bus server does not inherit our `current_dir`, while handing
+/// that same flag to `xterm` would stop it launching at all.
+fn resolved_program(program: &str) -> String {
+    let candidate = if program.contains('/') {
+        Some(PathBuf::from(program))
+    } else {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(program))
+                .find(|candidate| candidate.is_file())
+        })
+    };
+    candidate
+        .and_then(|path| fs::canonicalize(path).ok())
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| program.to_owned())
+}
+
 fn terminal_command(program: &str, path: &Path) -> Command {
     let mut command = Command::new(program);
-    if let Some(flags) = working_dir_flags(program) {
+    if let Some(flags) = working_dir_flags(&resolved_program(program)) {
         command.args(flags).arg(path);
     }
     command.current_dir(path);

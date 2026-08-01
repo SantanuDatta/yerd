@@ -25,5 +25,9 @@ export async function openWpAdmin(
       /* fall through to the plain link below */
     }
   }
-  await openInBrowser(wpAdminUrl(site, report));
+  try {
+    await openInBrowser(wpAdminUrl(site, report));
+  } catch {
+    /* nothing left to fall back to */
+  }
 }

@@ -138,11 +138,11 @@ async function openTerminal(site: SiteEntry): Promise<void> {
   }
 }
 
-async function openLogs(): Promise<void> {
+async function openDumps(): Promise<void> {
   try {
     await showDumpsWindow();
   } catch (error) {
-    toast.error("Couldn't open logs", (error as IpcError).message);
+    toast.error("Couldn't open the dumps window", (error as IpcError).message);
   }
 }
 
@@ -200,7 +200,8 @@ const panel = ref<HTMLElement | null>(null);
  *  from inside it (the unlink confirm) teleport into `<body>` after this panel,
  *  so a later `[role="dialog"]` in document order sits on top and owns Escape -
  *  without this both listeners fire and one keypress dismisses the pair. A panel
- *  that isn't in the document (a detached test mount) counts as first. */
+ *  that isn't in the document (a detached test mount) has index -1, so any other
+ *  open dialog counts as being above it. */
 function hasDialogAbove(): boolean {
   const dialogs = Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]'));
   const own = panel.value ? dialogs.indexOf(panel.value) : -1;
@@ -283,32 +284,38 @@ onUnmounted(() => {
           </Button>
         </div>
 
-        <div class="flex border-b px-5">
+        <div class="flex border-b px-5" role="tablist" aria-label="Site details sections">
           <button
+            id="site-details-tab-general"
             type="button"
             class="border-b-2 px-3 py-2.5 text-xs font-medium transition-colors"
             :class="activeTab === 'general' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
             :aria-selected="activeTab === 'general'"
+            aria-controls="site-details-panel-general"
             role="tab"
             @click="activeTab = 'general'"
           >
             General
           </button>
           <button
+            id="site-details-tab-domains"
             type="button"
             class="border-b-2 px-3 py-2.5 text-xs font-medium transition-colors"
             :class="activeTab === 'domains' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
             :aria-selected="activeTab === 'domains'"
+            aria-controls="site-details-panel-domains"
             role="tab"
             @click="activeTab = 'domains'"
           >
             Domains
           </button>
           <button
+            id="site-details-tab-information"
             type="button"
             class="border-b-2 px-3 py-2.5 text-xs font-medium transition-colors"
             :class="activeTab === 'information' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
             :aria-selected="activeTab === 'information'"
+            aria-controls="site-details-panel-information"
             role="tab"
             @click="activeTab = 'information'"
           >
@@ -316,7 +323,12 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        <div
+          :id="`site-details-panel-${activeTab}`"
+          class="min-h-0 flex-1 overflow-y-auto px-5 py-5"
+          role="tabpanel"
+          :aria-labelledby="`site-details-tab-${activeTab}`"
+        >
           <template v-if="activeTab === 'general'">
             <Button class="w-full" @click="openInBrowser(siteUrl(site, report))">
               Open site
@@ -327,8 +339,14 @@ onUnmounted(() => {
               <Button class="min-w-0 px-2" variant="outline" size="sm" @click="openTerminal(site)">
                 <Terminal /> <span class="truncate">Terminal</span>
               </Button>
-              <Button class="min-w-0 px-2" variant="outline" size="sm" @click="openLogs">
-                <FileText /> <span class="truncate">Logs</span>
+              <Button
+                class="min-w-0 px-2"
+                variant="outline"
+                size="sm"
+                title="Open the Dumps viewer (captured dump/query telemetry, all sites)"
+                @click="openDumps"
+              >
+                <FileText /> <span class="truncate">Dumps</span>
               </Button>
               <Button
                 v-if="site.is_wordpress"

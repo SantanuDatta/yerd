@@ -113,7 +113,7 @@ describe("SiteDetailsSidebar", () => {
     expect(wrapper.text()).toContain("8.3");
     expect(wrapper.text()).not.toContain("Tinker");
     expect(wrapper.text()).toContain("Terminal");
-    expect(wrapper.text()).toContain("Logs");
+    expect(wrapper.text()).toContain("Dumps");
     expect(wrapper.text()).not.toContain("Edit site");
 
     const openButton = wrapper.findAll("button").find((button) => button.text() === "Open site");
@@ -141,9 +141,9 @@ describe("SiteDetailsSidebar", () => {
     await terminal.trigger("click");
     expect(openInTerminal).toHaveBeenCalledWith("/srv/blog");
 
-    const logs = wrapper.findAll("button").find((button) => button.text().includes("Logs"));
-    if (!logs) throw new Error("Logs button not rendered");
-    await logs.trigger("click");
+    const dumps = wrapper.findAll("button").find((button) => button.text().includes("Dumps"));
+    if (!dumps) throw new Error("Dumps button not rendered");
+    await dumps.trigger("click");
     expect(showDumpsWindow).toHaveBeenCalledOnce();
   });
 

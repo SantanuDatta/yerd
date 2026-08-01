@@ -433,6 +433,14 @@ mod tests {
             tool: "x",
             install_hint: Some("y"),
         };
+        for reason in [
+            TerminalErrorReason::CreateLauncher(std::io::Error::from(std::io::ErrorKind::Other)),
+            TerminalErrorReason::PrepareLauncher(std::io::Error::from(std::io::ErrorKind::Other)),
+            TerminalErrorReason::OpenLauncher(std::io::Error::from(std::io::ErrorKind::Other)),
+            TerminalErrorReason::NoSupportedTerminal,
+        ] {
+            let _ = PlatformError::Terminal { reason };
+        }
     }
 
     /// Op-tag constants must be non-empty and stable strings.
@@ -455,6 +463,9 @@ mod tests {
             ops::UNINSTALL_PORT_REDIRECT,
             ops::INSTALL_LAN_PORT_REDIRECT,
             ops::UNINSTALL_LAN_PORT_REDIRECT,
+            ops::UNINSTALL_FIREFOX_NSS,
+            ops::BROWSER_CA_TRUST,
+            ops::OPEN_TERMINAL,
         ] {
             assert!(!op.is_empty());
         }

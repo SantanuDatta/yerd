@@ -84,7 +84,8 @@ function extraDomainCount(s: SiteEntry): number {
       <div class="flex shrink-0 items-center">
         <Spinner v-if="busy" class="size-4" />
         <!-- Every per-site action lives in the details sidebar this opens; the
-             card keeps only the two inline shortcuts (open, HTTPS). -->
+             card keeps only the inline shortcuts (open, HTTPS, and the WPA
+             one-click login chip when the site has it enabled). -->
         <Button
           variant="ghost"
           size="icon"
