@@ -116,10 +116,15 @@ function onKeydown(event: KeyboardEvent): void {
   if (props.open && event.key === "Escape") emit("close");
 }
 
+// Resync the edit buffer from the site it belongs to. Keyed on the site name
+// and the open flag as well as the saved value, because the parent keeps a
+// single instance and swaps the `site` prop rather than remounting - two sites
+// that both have no custom web root share the same `web_subpath`, so watching
+// that alone would carry an unsaved edit across to the next site.
 watch(
-  () => props.site?.web_subpath ?? "",
-  (value) => {
-    webRoot.value = value;
+  [() => props.open, () => props.site?.name, () => props.site?.web_subpath],
+  () => {
+    webRoot.value = props.site?.web_subpath ?? "";
   },
   { immediate: true },
 );

@@ -971,11 +971,6 @@ pub async fn open_terminal(path: String) -> Result<(), GuiError> {
         .map_err(|error| GuiError::internal(error.to_string()))
 }
 
-#[cfg(target_os = "macos")]
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 /// Persist a mail attachment into the app cache and return its absolute path.
 ///
 /// The OS opener cannot open a `data:` URL as a document, so the frontend sends

@@ -123,6 +123,30 @@ describe("SitePreviewSidebar", () => {
     expect(clipboardWriteText).toHaveBeenCalledWith("");
   });
 
+  it("drops an unsaved web root edit when pointed at another site", async () => {
+    const wrapper = mountSidebar();
+
+    await wrapper.get('[aria-label="Site web root"]').setValue("public");
+    await wrapper.setProps({ site: site({ name: "shop", document_root: "/srv/shop" }) });
+
+    expect((wrapper.get('[aria-label="Site web root"]').element as HTMLInputElement).value).toBe(
+      "",
+    );
+    expect(wrapper.findAll("button").find((button) => button.text() === "Save")).toBeUndefined();
+  });
+
+  it("drops an unsaved web root edit when reopened on the same site", async () => {
+    const wrapper = mountSidebar();
+
+    await wrapper.get('[aria-label="Site web root"]').setValue("public");
+    await wrapper.setProps({ open: false });
+    await wrapper.setProps({ open: true });
+
+    expect((wrapper.get('[aria-label="Site web root"]').element as HTMLInputElement).value).toBe(
+      "",
+    );
+  });
+
   it("closes when the backdrop is clicked", async () => {
     const wrapper = mountSidebar();
 

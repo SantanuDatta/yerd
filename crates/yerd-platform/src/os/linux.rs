@@ -19,6 +19,7 @@ use crate::metrics::SystemMetrics;
 use crate::paths::{Paths, PlatformDirs};
 use crate::port_binder::{BoundPort, PortBinder, PortPair};
 use crate::port_redirect::PortRedirector;
+use crate::pure::terminal_spec::{working_dir_flags, TERMINAL_SPECS};
 use crate::pure::{
     networkmanager_dnsmasq, pem_match, port_plan, proc_metrics, resolved_drop_in, system_roots,
 };
@@ -42,20 +43,10 @@ impl LinuxTerminalLauncher {
     }
 }
 
-const TERMINAL_SPECS: &[(&str, &[&str])] = &[
-    ("x-terminal-emulator", &["--working-directory"]),
-    ("gnome-terminal", &["--working-directory"]),
-    ("konsole", &["--workdir"]),
-    ("xfce4-terminal", &["--working-directory"]),
-    ("kitty", &["--directory"]),
-    ("alacritty", &["--working-directory"]),
-    ("wezterm", &["start", "--cwd"]),
-];
-
 fn terminal_command(program: &str, path: &Path) -> Command {
     let mut command = Command::new(program);
-    if let Some((_, flags)) = TERMINAL_SPECS.iter().find(|(name, _)| *name == program) {
-        command.args(*flags).arg(path);
+    if let Some(flags) = working_dir_flags(program) {
+        command.args(flags).arg(path);
     }
     command.current_dir(path);
     command
@@ -65,6 +56,9 @@ fn launch_terminal(program: &str, path: &Path) -> std::io::Result<()> {
     terminal_command(program, path).spawn().map(|_| ())
 }
 
+/// The terminal the user selected in Plasma, read from `kdeglobals`. Honoured
+/// ahead of the probe list so a machine with both Kitty and Konsole installed
+/// doesn't open the wrong one purely because of our probe order.
 fn configured_kde_terminal() -> Option<String> {
     for reader in ["kreadconfig6", "kreadconfig5"] {
         let output = Command::new(reader)
