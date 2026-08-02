@@ -33,7 +33,7 @@ use crate::port_binder::{BoundPort, PortBinder, PortPair};
 use crate::port_redirect::{
     loopback_port_reachable, loopback_redirect_reaches_proxy, PortRedirector,
 };
-use crate::pure::ide_spec::spec_for;
+use crate::pure::ide_spec::{mac_app_name_matches, spec_for};
 use crate::pure::{pem_match, pf_anchor, port_plan, ps_metrics, resolver_file};
 use crate::resolver::ResolverInstaller;
 use crate::terminal::TerminalLauncher;
@@ -154,8 +154,7 @@ fn executable_in_path(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// Find an application in standard folders, then through Spotlight.
-fn application_in_standard_locations(name: &str) -> Option<PathBuf> {
+fn application_locations() -> Vec<PathBuf> {
     let mut locations = vec![
         PathBuf::from("/Applications"),
         PathBuf::from("/System/Applications"),
@@ -164,23 +163,40 @@ fn application_in_standard_locations(name: &str) -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         locations.push(PathBuf::from(home).join("Applications"));
     }
-    if let Some(application) = locations
-        .into_iter()
-        .map(|directory| directory.join(format!("{name}.app")))
-        .find(|candidate| candidate.is_dir())
-    {
-        return Some(application);
-    }
+    locations
+}
 
-    let query = format!("kMDItemFSName == '{name}*.app'cd");
-    let output = Command::new("/usr/bin/mdfind").arg(query).output().ok()?;
+fn standard_application(ide: Ide, locations: &[PathBuf]) -> Option<PathBuf> {
+    spec_for(ide).and_then(|spec| {
+        spec.mac_app_names.iter().find_map(|name| {
+            locations
+                .iter()
+                .map(|directory| directory.join(format!("{name}.app")))
+                .find(|candidate| candidate.is_dir())
+        })
+    })
+}
+
+fn spotlight_applications(names: &[&str]) -> Vec<PathBuf> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let query = names
+        .iter()
+        .map(|name| format!("kMDItemFSName == '{name}*.app'cd"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let Ok(output) = Command::new("/usr/bin/mdfind").arg(query).output() else {
+        return Vec::new();
+    };
     if !output.status.success() {
-        return None;
+        return Vec::new();
     }
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(PathBuf::from)
-        .find(|candidate| candidate.is_dir())
+        .filter(|candidate| candidate.is_dir())
+        .collect()
 }
 
 fn ide_cli(ide: Ide) -> Option<PathBuf> {
@@ -191,12 +207,46 @@ fn ide_cli(ide: Ide) -> Option<PathBuf> {
     })
 }
 
-fn ide_application(ide: Ide) -> Option<PathBuf> {
-    spec_for(ide).and_then(|spec| {
-        spec.mac_app_names
-            .iter()
-            .find_map(|name| application_in_standard_locations(name))
-    })
+fn detected_applications() -> Vec<(Ide, PathBuf)> {
+    let locations = application_locations();
+    let mut found = Vec::new();
+    for ide in Ide::all() {
+        if let Some(application) = standard_application(*ide, &locations) {
+            found.push((*ide, application));
+        }
+    }
+
+    let mut missing_names = Vec::new();
+    for ide in Ide::all() {
+        if found.iter().any(|(found_ide, _)| *found_ide == *ide) {
+            continue;
+        }
+        if let Some(spec) = spec_for(*ide) {
+            for name in spec.mac_app_names {
+                if !missing_names.contains(name) {
+                    missing_names.push(*name);
+                }
+            }
+        }
+    }
+
+    for application in spotlight_applications(&missing_names) {
+        let Some(name) = application
+            .file_name()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.strip_suffix(".app"))
+        else {
+            continue;
+        };
+        let Some(ide) = Ide::all().iter().copied().find(|ide| {
+            !found.iter().any(|(found_ide, _)| *found_ide == *ide)
+                && mac_app_name_matches(*ide, name)
+        }) else {
+            continue;
+        };
+        found.push((ide, application));
+    }
+    found
 }
 
 /// macOS system-default opener.
@@ -236,10 +286,13 @@ impl SystemOpener for MacosSystemOpener {
 
 impl IdeLauncher for MacosIdeLauncher {
     fn installed_ides(&self) -> Vec<Ide> {
+        let applications = detected_applications();
         Ide::all()
             .iter()
             .copied()
-            .filter(|ide| ide_cli(*ide).is_some() || ide_application(*ide).is_some())
+            .filter(|ide| {
+                ide_cli(*ide).is_some() || applications.iter().any(|(found, _)| *found == *ide)
+            })
             .collect()
     }
 
@@ -256,7 +309,10 @@ impl IdeLauncher for MacosIdeLauncher {
             };
         }
 
-        let Some(application) = ide_application(ide) else {
+        let Some((_, application)) = detected_applications()
+            .into_iter()
+            .find(|(found, _)| *found == ide)
+        else {
             return Err(PlatformError::Ide {
                 reason: IdeErrorReason::NotInstalled(ide),
             });

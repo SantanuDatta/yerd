@@ -220,8 +220,13 @@ fn application_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-fn desktop_entry_in(directory: &Path, ide: Ide, depth: u8) -> Option<PathBuf> {
-    let entries = fs::read_dir(directory).ok()?;
+fn desktop_entries_in(directory: &Path, depth: u8, matches: &mut Vec<(Ide, PathBuf)>) {
+    if matches.len() == Ide::all().len() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
@@ -237,37 +242,54 @@ fn desktop_entry_in(directory: &Path, ide: Ide, depth: u8) -> Option<PathBuf> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
-            if desktop_entry_matches(ide, file_name, &contents) {
-                return Some(path);
+            for ide in Ide::all() {
+                if matches.iter().any(|(found, _)| *found == *ide) {
+                    continue;
+                }
+                if desktop_entry_matches(*ide, file_name, &contents) {
+                    matches.push((*ide, path.clone()));
+                    break;
+                }
             }
         } else if file_type.is_dir() && depth > 0 {
-            if let Some(path) = desktop_entry_in(&path, ide, depth - 1) {
-                return Some(path);
-            }
+            desktop_entries_in(&path, depth - 1, matches);
+        }
+        if matches.len() == Ide::all().len() {
+            return;
         }
     }
-    None
+}
+
+fn desktop_entries_for_ides() -> Vec<(Ide, PathBuf)> {
+    let mut matches = Vec::new();
+    for directory in application_dirs() {
+        desktop_entries_in(&directory, 1, &mut matches);
+        if matches.len() == Ide::all().len() {
+            break;
+        }
+    }
+    matches
 }
 
 fn desktop_entry_for(ide: Ide) -> Option<PathBuf> {
-    application_dirs()
-        .iter()
-        .find_map(|directory| desktop_entry_in(directory, ide, 1))
+    desktop_entries_for_ides()
+        .into_iter()
+        .find_map(|(found, path)| (found == ide).then_some(path))
 }
 
 fn launch_desktop_entry(desktop_entry: &Path, path: &Path) -> std::io::Result<()> {
     let mut last_error = None;
-    for (program, subcommand) in [
-        ("gio", "launch"),
-        ("kioclient", "exec"),
-        ("kioclient5", "exec"),
+    for (program, subcommand, pass_path) in [
+        ("gio", "launch", true),
+        ("kioclient", "exec", false),
+        ("kioclient5", "exec", false),
     ] {
-        match Command::new(program)
-            .args([subcommand])
-            .arg(desktop_entry)
-            .arg(path)
-            .spawn()
-        {
+        let mut command = Command::new(program);
+        command.args([subcommand]).arg(desktop_entry);
+        if pass_path {
+            command.arg(path);
+        }
+        match command.spawn() {
             Ok(_) => return Ok(()),
             Err(source) => last_error = Some(source),
         }
@@ -285,14 +307,23 @@ fn kde_session() -> bool {
         })
 }
 
-fn spawn_default_opener(program: &str, path: &Path) -> std::io::Result<()> {
-    let mut child = Command::new(program).arg(path).spawn()?;
+fn spawn_and_check(command: &mut Command, program: &str) -> std::io::Result<()> {
+    let mut child = command.spawn()?;
     match child.try_wait()? {
         Some(status) if !status.success() => Err(std::io::Error::other(format!(
             "{program} exited with {status}"
         ))),
         _ => Ok(()),
     }
+}
+
+fn spawn_default_opener(program: &str, path: &Path) -> std::io::Result<()> {
+    let mut command = Command::new(program);
+    if program == "gio" {
+        command.arg("open");
+    }
+    command.arg(path);
+    spawn_and_check(&mut command, program)
 }
 
 /// Linux system-default opener. KDE is checked first because some Plasma
@@ -334,21 +365,24 @@ impl SystemOpener for LinuxSystemOpener {
 
 impl IdeLauncher for LinuxIdeLauncher {
     fn installed_ides(&self) -> Vec<Ide> {
+        let desktop_entries = desktop_entries_for_ides();
         Ide::all()
             .iter()
             .copied()
-            .filter(|ide| ide_executable(*ide).is_some() || desktop_entry_for(*ide).is_some())
+            .filter(|ide| {
+                ide_executable(*ide).is_some()
+                    || desktop_entries.iter().any(|(found, _)| *found == *ide)
+            })
             .collect()
     }
 
     fn open_in_ide(&self, ide: Ide, path: &Path) -> Result<(), PlatformError> {
         if let Some(executable) = ide_executable(ide) {
-            return match Command::new(&executable)
-                .arg(path)
-                .current_dir(path)
-                .spawn()
-            {
-                Ok(_) => Ok(()),
+            let program = executable.to_string_lossy().into_owned();
+            let mut command = Command::new(&executable);
+            command.arg(path).current_dir(path);
+            return match spawn_and_check(&mut command, &program) {
+                Ok(()) => Ok(()),
                 Err(source) => Err(PlatformError::Ide {
                     reason: IdeErrorReason::Launch { ide, source },
                 }),

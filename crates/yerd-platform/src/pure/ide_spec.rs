@@ -78,6 +78,26 @@ pub fn desktop_name_matches(ide: Ide, name: &str) -> bool {
     })
 }
 
+/// Return whether a macOS application bundle name identifies the selected IDE.
+/// Versioned and preview bundle names may add a suffix after the known name.
+#[must_use]
+pub fn mac_app_name_matches(ide: Ide, name: &str) -> bool {
+    let name = name.trim();
+    spec_for(ide).is_some_and(|spec| {
+        spec.mac_app_names.iter().any(|candidate| {
+            if name.eq_ignore_ascii_case(candidate) {
+                return true;
+            }
+            let Some(prefix) = name.get(..candidate.len()) else {
+                return false;
+            };
+            let suffix = &name[candidate.len()..];
+            prefix.eq_ignore_ascii_case(candidate)
+                && (suffix.starts_with(' ') || suffix.starts_with('-'))
+        })
+    })
+}
+
 fn desktop_id_matches(ide: Ide, file_name: &str) -> bool {
     let id = file_name
         .trim()
@@ -208,5 +228,15 @@ mod tests {
             "codecs.desktop",
             unrelated
         ));
+    }
+
+    #[test]
+    fn mac_app_names_match_versioned_and_preview_bundles() {
+        assert!(mac_app_name_matches(Ide::PhpStorm, "PhpStorm 2025.1"));
+        assert!(mac_app_name_matches(
+            Ide::VsCode,
+            "Visual Studio Code - Insiders"
+        ));
+        assert!(!mac_app_name_matches(Ide::VsCode, "Codecs"));
     }
 }

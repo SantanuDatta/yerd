@@ -955,17 +955,23 @@ pub async fn job_cancel(job_id: String) -> Result<Response, GuiError> {
 
 // ── host helpers ───────────────────────────────────────────────────────────
 
+fn validated_project_directory(path: String) -> Result<PathBuf, GuiError> {
+    let path = PathBuf::from(path);
+    if path.is_dir() {
+        Ok(path)
+    } else {
+        Err(GuiError::internal(format!(
+            "project path is not a directory: {}",
+            path.display()
+        )))
+    }
+}
+
 /// Validate a project directory and delegate terminal launching to the active
 /// OS implementation in `yerd-platform`.
 #[tauri::command]
 pub async fn open_terminal(path: String) -> Result<(), GuiError> {
-    let path = PathBuf::from(path);
-    if !path.is_dir() {
-        return Err(GuiError::internal(format!(
-            "project path is not a directory: {}",
-            path.display()
-        )));
-    }
+    let path = validated_project_directory(path)?;
     yerd_platform::ActiveTerminalLauncher::new()
         .open_terminal(&path)
         .map_err(|error| GuiError::internal(error.to_string()))
@@ -999,7 +1005,7 @@ pub fn get_installed_ides() -> Vec<IdeOption> {
 /// fallbacks and keeps site paths outside the frontend opener scope working.
 #[tauri::command]
 pub async fn open_in_default(path: String) -> Result<(), GuiError> {
-    let path = PathBuf::from(path);
+    let path = validated_project_directory(path)?;
     yerd_platform::ActiveSystemOpener::new()
         .open_path(&path)
         .map_err(|error| GuiError::internal(error.to_string()))
@@ -1008,7 +1014,7 @@ pub async fn open_in_default(path: String) -> Result<(), GuiError> {
 /// Open a project directory in a selected, host-detected IDE.
 #[tauri::command]
 pub async fn open_in_ide(path: String, ide: String) -> Result<(), GuiError> {
-    let path = PathBuf::from(path);
+    let path = validated_project_directory(path)?;
     let ide = yerd_platform::Ide::from_wire(&ide)
         .ok_or_else(|| GuiError::internal(format!("unsupported IDE: {ide}")))?;
     yerd_platform::ActiveIdeLauncher::new()
@@ -1229,6 +1235,25 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, "not_found");
         assert_eq!(err.message, "no such site");
+    }
+
+    #[test]
+    fn validated_project_directory_accepts_directories() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            validated_project_directory(directory.path().display().to_string()).unwrap(),
+            directory.path()
+        );
+    }
+
+    #[test]
+    fn validated_project_directory_rejects_non_directories() {
+        let err = validated_project_directory("/path/that/does/not/exist".to_owned())
+            .expect_err("missing path must be rejected");
+        assert_eq!(
+            err.message,
+            "project path is not a directory: /path/that/does/not/exist"
+        );
     }
 
     #[test]
