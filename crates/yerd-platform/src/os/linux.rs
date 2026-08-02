@@ -1,4 +1,4 @@
-//! Linux implementations of the four traits.
+//! Linux implementations of the host-platform traits.
 //!
 //! `Paths` uses XDG directories via the `directories` crate; the
 //! `runtime` fallback parses `/proc/self/status` to find the real UID
@@ -9,16 +9,21 @@
 
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use directories::ProjectDirs;
 
 use crate::error::ops;
+use crate::ide::IdeLauncher;
 use crate::metrics::SystemMetrics;
+use crate::opener::SystemOpener;
 use crate::paths::{Paths, PlatformDirs};
 use crate::port_binder::{BoundPort, PortBinder, PortPair};
 use crate::port_redirect::PortRedirector;
+use crate::pure::ide_spec::{desktop_entry_matches, spec_for};
+use crate::pure::opener_spec::linux_default_openers;
 use crate::pure::terminal_spec::{working_dir_flags, TERMINAL_SPECS};
 use crate::pure::{
     networkmanager_dnsmasq, pem_match, port_plan, proc_metrics, resolved_drop_in, system_roots,
@@ -27,8 +32,8 @@ use crate::resolver::ResolverInstaller;
 use crate::terminal::TerminalLauncher;
 use crate::trust_store::{BrowserCaTrust, CaFingerprint, NssOutcome, TrustStore};
 use crate::{
-    BindPairErrorReason, PlatformError, ResolverErrorReason, TerminalErrorReason,
-    TrustStoreErrorReason,
+    BindPairErrorReason, Ide, IdeErrorReason, PlatformError, ResolverErrorReason,
+    TerminalErrorReason, TrustStoreErrorReason,
 };
 
 /// Linux terminal launcher.
@@ -136,6 +141,231 @@ impl TerminalLauncher for LinuxTerminalLauncher {
         }
         Err(PlatformError::Terminal {
             reason: TerminalErrorReason::NoSupportedTerminal,
+        })
+    }
+}
+
+/// Linux IDE launcher using a command-line launcher or a freedesktop desktop entry.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LinuxIdeLauncher;
+
+impl LinuxIdeLauncher {
+    /// Construct.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+fn executable_in_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(name))
+            .find(|candidate| {
+                fs::metadata(candidate).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+    })
+}
+
+fn ide_executable(ide: Ide) -> Option<PathBuf> {
+    spec_for(ide).and_then(|spec| {
+        spec.cli_names
+            .iter()
+            .find_map(|name| executable_in_path(name))
+    })
+}
+
+/// Return the XDG application directories plus common package-manager exports.
+fn application_dirs() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    let mut add_root = |root: PathBuf| {
+        if !root.as_os_str().is_empty() && !roots.contains(&root) {
+            roots.push(root);
+        }
+    };
+
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME").filter(|p| !p.is_empty()) {
+        add_root(PathBuf::from(data_home));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        add_root(home.join(".local/share"));
+        add_root(home.join(".local/share/flatpak/exports/share"));
+        add_root(home.join(".nix-profile/share"));
+    }
+
+    let data_dirs = std::env::var_os("XDG_DATA_DIRS")
+        .filter(|p| !p.is_empty())
+        .map_or_else(
+            || {
+                vec![
+                    PathBuf::from("/usr/local/share"),
+                    PathBuf::from("/usr/share"),
+                ]
+            },
+            |paths| std::env::split_paths(&paths).collect::<Vec<_>>(),
+        );
+    for root in data_dirs {
+        add_root(root);
+    }
+    add_root(PathBuf::from("/var/lib/flatpak/exports/share"));
+    add_root(PathBuf::from("/var/lib/snapd/desktop"));
+    add_root(PathBuf::from("/run/current-system/sw/share"));
+    roots
+        .into_iter()
+        .map(|root| root.join("applications"))
+        .collect()
+}
+
+fn desktop_entry_in(directory: &Path, ide: Ide, depth: u8) -> Option<PathBuf> {
+    let entries = fs::read_dir(directory).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) == Some("desktop")
+        {
+            let Ok(contents) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if desktop_entry_matches(ide, file_name, &contents) {
+                return Some(path);
+            }
+        } else if file_type.is_dir() && depth > 0 {
+            if let Some(path) = desktop_entry_in(&path, ide, depth - 1) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn desktop_entry_for(ide: Ide) -> Option<PathBuf> {
+    application_dirs()
+        .iter()
+        .find_map(|directory| desktop_entry_in(directory, ide, 1))
+}
+
+fn launch_desktop_entry(desktop_entry: &Path, path: &Path) -> std::io::Result<()> {
+    let mut last_error = None;
+    for (program, subcommand) in [
+        ("gio", "launch"),
+        ("kioclient", "exec"),
+        ("kioclient5", "exec"),
+    ] {
+        match Command::new(program)
+            .args([subcommand])
+            .arg(desktop_entry)
+            .arg(path)
+            .spawn()
+        {
+            Ok(_) => return Ok(()),
+            Err(source) => last_error = Some(source),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound)))
+}
+
+fn kde_session() -> bool {
+    std::env::var_os("KDE_FULL_SESSION").is_some_and(|value| !value.is_empty())
+        || std::env::var_os("XDG_CURRENT_DESKTOP").is_some_and(|value| {
+            value
+                .to_string_lossy()
+                .split(':')
+                .any(|desktop| desktop.eq_ignore_ascii_case("kde"))
+        })
+}
+
+fn spawn_default_opener(program: &str, path: &Path) -> std::io::Result<()> {
+    let mut child = Command::new(program).arg(path).spawn()?;
+    match child.try_wait()? {
+        Some(status) if !status.success() => Err(std::io::Error::other(format!(
+            "{program} exited with {status}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Linux system-default opener. KDE is checked first because some Plasma
+/// sessions do not export `KDE_SESSION_VERSION`, which makes `xdg-open`
+/// choose its obsolete `kfmclient` fallback instead of the native opener.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LinuxSystemOpener;
+
+impl LinuxSystemOpener {
+    /// Construct.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl SystemOpener for LinuxSystemOpener {
+    fn open_path(&self, path: &Path) -> Result<(), PlatformError> {
+        let mut last_error = None;
+        for program in linux_default_openers(kde_session()) {
+            match spawn_default_opener(program, path) {
+                Ok(()) => return Ok(()),
+                Err(source) => last_error = Some((program, source)),
+            }
+        }
+        let Some((program, source)) = last_error else {
+            return Err(PlatformError::SystemOpen {
+                reason: crate::OpenErrorReason::NoSupportedOpener,
+            });
+        };
+        Err(PlatformError::SystemOpen {
+            reason: crate::OpenErrorReason::Launch {
+                program: (*program).to_owned(),
+                source,
+            },
+        })
+    }
+}
+
+impl IdeLauncher for LinuxIdeLauncher {
+    fn installed_ides(&self) -> Vec<Ide> {
+        Ide::all()
+            .iter()
+            .copied()
+            .filter(|ide| ide_executable(*ide).is_some() || desktop_entry_for(*ide).is_some())
+            .collect()
+    }
+
+    fn open_in_ide(&self, ide: Ide, path: &Path) -> Result<(), PlatformError> {
+        if let Some(executable) = ide_executable(ide) {
+            return match Command::new(&executable)
+                .arg(path)
+                .current_dir(path)
+                .spawn()
+            {
+                Ok(_) => Ok(()),
+                Err(source) => Err(PlatformError::Ide {
+                    reason: IdeErrorReason::Launch { ide, source },
+                }),
+            };
+        }
+
+        if let Some(desktop_entry) = desktop_entry_for(ide) {
+            return match launch_desktop_entry(&desktop_entry, path) {
+                Ok(()) => Ok(()),
+                Err(source) => Err(PlatformError::Ide {
+                    reason: IdeErrorReason::Launch { ide, source },
+                }),
+            };
+        }
+
+        Err(PlatformError::Ide {
+            reason: IdeErrorReason::NotInstalled(ide),
         })
     }
 }

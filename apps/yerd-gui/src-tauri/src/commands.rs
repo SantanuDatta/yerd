@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use yerd_core::PhpVersion;
 use yerd_ipc::{ErrorCode, Request, Response};
-use yerd_platform::TerminalLauncher;
+use yerd_platform::{IdeLauncher, SystemOpener, TerminalLauncher};
 
 use crate::error::GuiError;
 use crate::ipc::{exchange, exchange_timeout};
@@ -968,6 +968,51 @@ pub async fn open_terminal(path: String) -> Result<(), GuiError> {
     }
     yerd_platform::ActiveTerminalLauncher::new()
         .open_terminal(&path)
+        .map_err(|error| GuiError::internal(error.to_string()))
+}
+
+/// An IDE available to the current host, returned to the site details sidebar.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdeOption {
+    /// Stable identifier used by the site details action.
+    pub id: String,
+    /// User-facing IDE name.
+    pub label: String,
+}
+
+/// List supported IDE launchers detected on this host.
+#[tauri::command]
+pub fn get_installed_ides() -> Vec<IdeOption> {
+    yerd_platform::ActiveIdeLauncher::new()
+        .installed_ides()
+        .into_iter()
+        .map(|ide| IdeOption {
+            id: ide.wire_name().to_owned(),
+            label: ide.display_name().to_owned(),
+        })
+        .collect()
+}
+
+/// Open an existing project directory with the host's default application.
+/// The platform abstraction handles KDE's native opener before generic XDG
+/// fallbacks and keeps site paths outside the frontend opener scope working.
+#[tauri::command]
+pub async fn open_in_default(path: String) -> Result<(), GuiError> {
+    let path = PathBuf::from(path);
+    yerd_platform::ActiveSystemOpener::new()
+        .open_path(&path)
+        .map_err(|error| GuiError::internal(error.to_string()))
+}
+
+/// Open a project directory in a selected, host-detected IDE.
+#[tauri::command]
+pub async fn open_in_ide(path: String, ide: String) -> Result<(), GuiError> {
+    let path = PathBuf::from(path);
+    let ide = yerd_platform::Ide::from_wire(&ide)
+        .ok_or_else(|| GuiError::internal(format!("unsupported IDE: {ide}")))?;
+    yerd_platform::ActiveIdeLauncher::new()
+        .open_in_ide(ide, &path)
         .map_err(|error| GuiError::internal(error.to_string()))
 }
 
