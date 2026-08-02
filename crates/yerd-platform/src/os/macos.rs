@@ -249,7 +249,7 @@ impl IdeLauncher for MacosIdeLauncher {
             let mut command = Command::new(&executable);
             command.arg(path).current_dir(path);
             return match spawn_and_check(&mut command, &program) {
-                Ok(_) => Ok(()),
+                Ok(()) => Ok(()),
                 Err(source) => Err(PlatformError::Ide {
                     reason: IdeErrorReason::Launch { ide, source },
                 }),
@@ -264,7 +264,7 @@ impl IdeLauncher for MacosIdeLauncher {
         let mut command = Command::new("/usr/bin/open");
         command.args(["-a"]).arg(application).arg(path);
         match spawn_and_check(&mut command, "/usr/bin/open") {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(source) => Err(PlatformError::Ide {
                 reason: IdeErrorReason::Launch { ide, source },
             }),
