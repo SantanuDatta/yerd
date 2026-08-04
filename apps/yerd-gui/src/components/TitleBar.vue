@@ -90,7 +90,7 @@ async function flushMaximizedPersistence(): Promise<void> {
       await setGuiMaximized(value);
       lastPersistedMaximized = value;
     } catch {
-      pendingMaximized = value;
+      if (pendingMaximized === null) pendingMaximized = value;
       break;
     }
   }
