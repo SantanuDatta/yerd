@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { Minus, Plus, Square, X } from "lucide-vue-next";
+import { Copy, Minus, Plus, Square, X } from "lucide-vue-next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { hostPlatform } from "@/ipc/client";
+import logoUrl from "@/assets/logo.svg";
+import { hostPlatform, setGuiMaximized } from "@/ipc/client";
 import { useTitleBarStyle } from "@/lib/titleBarStyle";
 
 // The window is decorationless (see tauri.conf.json) so we draw our own
@@ -48,6 +49,7 @@ const resolved = computed(() =>
 // Controls always target the window this titlebar is mounted in, so the one
 // component drives both the main window and the Mails window.
 const win = getCurrentWindow();
+let lastPersistedMaximized: boolean | null = null;
 
 // Close mirrors the native red button: main.rs intercepts CloseRequested and
 // hides to tray rather than quitting, so this is the same close-to-tray gesture.
@@ -57,8 +59,30 @@ function close() {
 function minimize() {
   win.minimize();
 }
-function toggleMaximize() {
-  win.toggleMaximize();
+const maximized = ref(false);
+
+function updateMaximized(value: boolean): void {
+  maximized.value = value;
+  document.documentElement.classList.toggle("window-maximized", value);
+
+  // Only the main window owns the app-wide persisted maximize preference.
+  // Mails and Dumps reuse this component but must not overwrite it.
+  if (win.label === "main" && lastPersistedMaximized !== value) {
+    lastPersistedMaximized = value;
+    void setGuiMaximized(value).catch(() => {});
+  }
+}
+
+function refreshMaximized(): void {
+  win
+    .isMaximized()
+    .then(updateMaximized)
+    .catch(() => {});
+}
+
+async function toggleMaximize(): Promise<void> {
+  await win.toggleMaximize();
+  refreshMaximized();
 }
 
 // macOS-only: real traffic lights drop to a flat gray while the window is
@@ -68,7 +92,9 @@ function toggleMaximize() {
 const focused = ref(true);
 let disposed = false;
 let unlistenFocus: (() => void) | null = null;
+let unlistenResize: (() => void) | null = null;
 onMounted(() => {
+  refreshMaximized();
   win.isFocused()
     .then((f) => (focused.value = f))
     .catch(() => {});
@@ -85,10 +111,22 @@ onMounted(() => {
       }
     })
     .catch(() => {});
+  win
+    .onResized(() => refreshMaximized())
+    .then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        unlistenResize = unlisten;
+      }
+    })
+    .catch(() => {});
 });
 onUnmounted(() => {
   disposed = true;
   unlistenFocus?.();
+  unlistenResize?.();
+  document.documentElement.classList.remove("window-maximized");
 });
 
 // Linux/Linux-Reversed/Windows controls, data-driven so the three styles share
@@ -110,12 +148,12 @@ const rightControls = computed<ControlKind[]>(() => {
 function controlLabel(kind: ControlKind): string {
   if (kind === "close") return "Close";
   if (kind === "minimize") return "Minimize";
-  return "Maximize";
+  return maximized.value ? "Restore" : "Maximize";
 }
 function controlIcon(kind: ControlKind) {
   if (kind === "close") return X;
   if (kind === "minimize") return Minus;
-  return Square;
+  return maximized.value ? Copy : Square;
 }
 function controlIconClass(kind: ControlKind): string {
   return kind === "maximize" ? "size-3.5" : "size-4";
@@ -140,7 +178,7 @@ function controlButtonClass(kind: ControlKind): string {
 <template>
   <header
     data-tauri-drag-region
-    class="relative flex h-8 shrink-0 items-center border-b bg-muted px-3 text-foreground dark:bg-card"
+    class="relative flex h-8 w-full shrink-0 items-center border-b bg-muted px-3 text-foreground dark:bg-card"
     @dblclick="toggleMaximize"
   >
     <!-- macOS: traffic lights (close / minimize / zoom). Colored while the
@@ -190,6 +228,14 @@ function controlButtonClass(kind: ControlKind): string {
         <component :is="controlIcon(kind)" :class="controlIconClass(kind)" />
       </button>
     </div>
+
+    <img
+      v-if="resolved === 'windows'"
+      :src="logoUrl"
+      alt=""
+      aria-hidden="true"
+      class="-ml-1 size-5 shrink-0 rounded-md"
+    />
 
     <!-- Centered window title (native feel); pointer-events stay with the drag region. -->
     <span

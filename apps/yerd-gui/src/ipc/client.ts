@@ -1069,6 +1069,10 @@ export async function setAutostartGuiMinimized(on: boolean): Promise<void> {
   await call<void>("set_gui_minimized", { on });
 }
 
+export async function setGuiMaximized(maximized: boolean): Promise<void> {
+  await call<void>("set_gui_maximized", { maximized });
+}
+
 /** Return supported IDEs detected on the host. */
 export async function getInstalledIdes(): Promise<IdeOption[]> {
   return call<IdeOption[]>("get_installed_ides");
