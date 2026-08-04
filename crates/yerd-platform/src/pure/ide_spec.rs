@@ -78,6 +78,48 @@ pub fn desktop_name_matches(ide: Ide, name: &str) -> bool {
     })
 }
 
+fn mac_preview_label_matches(value: &str) -> bool {
+    ["Beta", "Canary", "EAP", "Insiders", "Nightly", "Preview"]
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(value))
+}
+
+fn mac_version_matches(value: &str) -> bool {
+    let mut components = value.split('.');
+    components.next().is_some_and(|component| {
+        !component.is_empty()
+            && component
+                .chars()
+                .all(|character| character.is_ascii_digit())
+    }) && components.all(|component| {
+        !component.is_empty()
+            && component
+                .chars()
+                .all(|character| character.is_ascii_digit())
+    })
+}
+
+fn mac_app_suffix_matches(suffix: &str) -> bool {
+    let Some(suffix) = suffix.strip_prefix(' ') else {
+        return false;
+    };
+    let mut words = suffix.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    if mac_version_matches(first) {
+        return match words.next() {
+            None => true,
+            Some(label) if mac_preview_label_matches(label) => words.next().is_none(),
+            Some(_) => false,
+        };
+    }
+    let Some(label) = suffix.strip_prefix("- ") else {
+        return false;
+    };
+    mac_preview_label_matches(label)
+}
+
 /// Return whether a macOS application bundle name identifies the selected IDE.
 /// Versioned and preview bundle names may add a suffix after the known name.
 #[must_use]
@@ -91,9 +133,10 @@ pub fn mac_app_name_matches(ide: Ide, name: &str) -> bool {
             let Some(prefix) = name.get(..candidate.len()) else {
                 return false;
             };
-            let suffix = &name[candidate.len()..];
-            prefix.eq_ignore_ascii_case(candidate)
-                && (suffix.starts_with(' ') || suffix.starts_with('-'))
+            let Some(suffix) = name.get(candidate.len()..) else {
+                return false;
+            };
+            prefix.eq_ignore_ascii_case(candidate) && mac_app_suffix_matches(suffix)
         })
     })
 }
@@ -237,6 +280,11 @@ mod tests {
             Ide::VsCode,
             "Visual Studio Code - Insiders"
         ));
+        assert!(mac_app_name_matches(Ide::PhpStorm, "PhpStorm 2025.1 EAP"));
         assert!(!mac_app_name_matches(Ide::VsCode, "Codecs"));
+        assert!(!mac_app_name_matches(
+            Ide::VsCode,
+            "Visual Studio Code - Backup"
+        ));
     }
 }
